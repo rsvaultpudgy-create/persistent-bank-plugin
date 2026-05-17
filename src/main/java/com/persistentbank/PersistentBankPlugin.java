@@ -390,11 +390,19 @@ public class PersistentBankPlugin extends Plugin
 
 	/** Returns the AccountState for the currently-logged-in account,
 	 *  creating one on first sight. Returns null if no account is
-	 *  logged in (accountHash < 0). */
+	 *  logged in.
+	 *
+	 *  RuneLite's Client.getAccountHash() returns -1L as the documented
+	 *  sentinel for "no account logged in". Real Jagex account hashes
+	 *  are 64-bit values that can appear negative when read as signed
+	 *  Java longs (high bit set), so we must check the exact -1L
+	 *  sentinel rather than "hash <= 0" — otherwise we silently drop
+	 *  every account whose hash happens to land in the negative half
+	 *  of the signed-long range. */
 	private AccountState stateForCurrentAccount()
 	{
 		long hash = client.getAccountHash();
-		if (hash <= 0)
+		if (hash == -1L)
 		{
 			return null;
 		}
