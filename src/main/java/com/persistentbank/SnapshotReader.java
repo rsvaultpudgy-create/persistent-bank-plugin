@@ -110,9 +110,13 @@ class SnapshotReader
 				+ s.equipmentValueGp + s.seedVaultValueGp;
 		}
 
-		if (s.accountHash <= 0)
+		if (s.accountHash == -1L)
 		{
-			// Not a valid snapshot file.
+			// Sentinel for "no account logged in" — not a real snapshot.
+			// Anything else (including negative-signed Jagex hashes, which
+			// are valid 64-bit identifiers whose high bit happens to be set)
+			// must be accepted, otherwise the panel silently drops roughly
+			// half of all accounts.
 			return null;
 		}
 		return s;
