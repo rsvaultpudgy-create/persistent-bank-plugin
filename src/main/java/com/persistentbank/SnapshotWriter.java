@@ -40,11 +40,10 @@ class SnapshotWriter
 		root.addProperty("displayName", state.displayName == null ? "" : state.displayName);
 		root.addProperty("lastUpdated", nowMs);
 		// Top-level totalValueGp: sum of bank + inventory + equipment + seed
-		// vault GE prices at write time. Grand Exchange deliberately not
-		// included — pending orders can double-count coins the player also
-		// has in the bank, and finished-but-uncollected items sit on the
-		// GE until the player hits Collect. Consumers that want a fully
-		// complete picture can walk the per-slot data themselves.
+		// vault + Grand Exchange, valued at write time. The GE figure counts
+		// coins still committed to open offers plus items and coins waiting in
+		// the collection box, which have already left the other containers, so
+		// it is added without double-counting.
 		root.addProperty("totalValueGp", state.totalValueGp);
 
 		if (state.bank != null)
@@ -65,7 +64,7 @@ class SnapshotWriter
 		}
 		if (state.grandExchange != null)
 		{
-			root.add("grandExchange", geSection(state.grandExchange, state.geUpdatedAt));
+			root.add("grandExchange", geSection(state.grandExchange, state.geUpdatedAt, state.geValueGp));
 		}
 
 		return root;
@@ -139,10 +138,11 @@ class SnapshotWriter
 		return s;
 	}
 
-	private JsonObject geSection(List<AccountState.GeSlot> slots, long updatedAt)
+	private JsonObject geSection(List<AccountState.GeSlot> slots, long updatedAt, long valueGp)
 	{
 		JsonObject s = new JsonObject();
 		s.addProperty("updatedAt", updatedAt);
+		s.addProperty("totalValueGp", valueGp);
 		JsonArray arr = new JsonArray();
 		for (AccountState.GeSlot slot : slots)
 		{

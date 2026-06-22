@@ -44,6 +44,8 @@ class AccountState
 
 	/** Rate-limiter state. */
 	long lastWriteMs;
+	/** Epoch ms of the last appended wealth-history point (login-burst throttle). */
+	long lastHistoryMs;
 	boolean dirty;
 
 	/** Reference to a pending deferred-flush so we can cancel/coalesce. */
@@ -72,8 +74,9 @@ class AccountState
 	long inventoryValueGp;
 	long equipmentValueGp;
 	long seedVaultValueGp;
+	long geValueGp;
 
-	/** Sum of the four section values above. Convenience for the panel's
+	/** Sum of the five section values above. Convenience for the panel's
 	 *  grand-total row and for external readers that don't want to sum
 	 *  the sections themselves. */
 	long totalValueGp;

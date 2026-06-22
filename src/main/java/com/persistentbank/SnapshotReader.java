@@ -35,6 +35,7 @@ class SnapshotReader
 		long inventoryValueGp;
 		long equipmentValueGp;
 		long seedVaultValueGp;
+		long geValueGp;
 	}
 
 	/** Scan {@code snapshotDir} for *.json files and parse each into an
@@ -98,6 +99,7 @@ class SnapshotReader
 		s.inventoryValueGp = sectionValue(root, "inventory");
 		s.equipmentValueGp = sectionValue(root, "equipment");
 		s.seedVaultValueGp = sectionValue(root, "seedVault");
+		s.geValueGp = sectionValue(root, "grandExchange");
 
 		// Fallback: older snapshots pre-dating the wealth-panel work don't
 		// have a top-level totalValueGp. Derive from sections so those
@@ -107,7 +109,8 @@ class SnapshotReader
 		{
 			s.totalValueGp =
 				s.bankValueGp + s.inventoryValueGp
-				+ s.equipmentValueGp + s.seedVaultValueGp;
+				+ s.equipmentValueGp + s.seedVaultValueGp
+				+ s.geValueGp;
 		}
 
 		if (s.accountHash == -1L)
@@ -160,6 +163,162 @@ class SnapshotReader
 		catch (Exception e)
 		{
 			return fallback;
+		}
+	}
+
+	/** Seed an in-memory {@link AccountState} from this account's last
+	 *  on-disk snapshot. Only the "open-on-demand" sections (bank, seed
+	 *  vault, Grand Exchange) are restored: those don't get re-read every
+	 *  login, so without this a flush fired before the player re-opens them
+	 *  would overwrite the saved file with empty sections. Inventory and
+	 *  equipment are deliberately left alone — the plugin re-reads those live
+	 *  on every login. No-op when there is no prior file or it can't be
+	 *  parsed. Safe on any thread; touches no client state. */
+	void hydrate(Path snapshotDir, AccountState s)
+	{
+		if (snapshotDir == null || s == null)
+		{
+			return;
+		}
+		Path p = snapshotDir.resolve(s.accountHash + ".json");
+		if (!Files.isRegularFile(p))
+		{
+			return;
+		}
+		try
+		{
+			String raw = Files.readString(p);
+			@SuppressWarnings("deprecation")
+			JsonElement parsed = new JsonParser().parse(raw);
+			if (!parsed.isJsonObject())
+			{
+				return;
+			}
+			JsonObject root = parsed.getAsJsonObject();
+
+			String dn = asString(root, "displayName", "");
+			if (!dn.isEmpty())
+			{
+				s.displayName = dn;
+			}
+
+			JsonObject bank = sectionObj(root, "bank");
+			if (bank != null)
+			{
+				List<AccountState.ContainerItem> items = parseContainerItems(bank);
+				if (items != null)
+				{
+					s.bank = items;
+					s.bankUpdatedAt = asLong(bank, "updatedAt");
+					s.bankValueGp = asLong(bank, "totalValueGp");
+				}
+			}
+
+			JsonObject sv = sectionObj(root, "seedVault");
+			if (sv != null)
+			{
+				List<AccountState.ContainerItem> items = parseContainerItems(sv);
+				if (items != null)
+				{
+					s.seedVault = items;
+					s.seedVaultUpdatedAt = asLong(sv, "updatedAt");
+					s.seedVaultValueGp = asLong(sv, "totalValueGp");
+				}
+			}
+
+			JsonObject ge = sectionObj(root, "grandExchange");
+			if (ge != null)
+			{
+				List<AccountState.GeSlot> slots = parseGeSlots(ge);
+				if (slots != null)
+				{
+					s.grandExchange = slots;
+					s.geUpdatedAt = asLong(ge, "updatedAt");
+					s.geValueGp = asLong(ge, "totalValueGp");
+				}
+			}
+		}
+		catch (Exception ignored)
+		{
+			// Corrupt / partial snapshot — start clean rather than fail.
+		}
+	}
+
+	private static JsonObject sectionObj(JsonObject root, String name)
+	{
+		if (root == null || !root.has(name) || !root.get(name).isJsonObject())
+		{
+			return null;
+		}
+		return root.getAsJsonObject(name);
+	}
+
+	private static List<AccountState.ContainerItem> parseContainerItems(JsonObject section)
+	{
+		if (!section.has("items") || !section.get("items").isJsonArray())
+		{
+			return null;
+		}
+		List<AccountState.ContainerItem> out = new ArrayList<>();
+		for (JsonElement el : section.getAsJsonArray("items"))
+		{
+			if (!el.isJsonObject())
+			{
+				continue;
+			}
+			JsonObject o = el.getAsJsonObject();
+			int id = (int) asLong(o, "id");
+			int qty = (int) asLong(o, "qty");
+			if (id <= 0 || qty <= 0)
+			{
+				continue;
+			}
+			boolean noted = o.has("noted") && !o.get("noted").isJsonNull() && o.get("noted").getAsBoolean();
+			out.add(new AccountState.ContainerItem(id, qty, noted));
+		}
+		return out;
+	}
+
+	private static List<AccountState.GeSlot> parseGeSlots(JsonObject section)
+	{
+		if (!section.has("slots") || !section.get("slots").isJsonArray())
+		{
+			return null;
+		}
+		List<AccountState.GeSlot> out = new ArrayList<>();
+		for (JsonElement el : section.getAsJsonArray("slots"))
+		{
+			if (!el.isJsonObject())
+			{
+				continue;
+			}
+			JsonObject o = el.getAsJsonObject();
+			int slot = (int) asLong(o, "slot");
+			String state = asString(o, "state", "EMPTY");
+			out.add(new AccountState.GeSlot(
+				slot, state,
+				asIntOrNull(o, "itemId"),
+				asIntOrNull(o, "qtySought"),
+				asIntOrNull(o, "qtyTraded"),
+				asIntOrNull(o, "pricePer"),
+				asIntOrNull(o, "spent")));
+		}
+		return out;
+	}
+
+	private static Integer asIntOrNull(JsonObject o, String key)
+	{
+		if (o == null || !o.has(key) || o.get(key).isJsonNull())
+		{
+			return null;
+		}
+		try
+		{
+			return o.get(key).getAsInt();
+		}
+		catch (Exception e)
+		{
+			return null;
 		}
 	}
 }

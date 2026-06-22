@@ -51,6 +51,7 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.GrandExchangeOfferChanged;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.client.RuneLite;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
@@ -62,7 +63,7 @@ import net.runelite.client.util.ImageUtil;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Persistent Bank",
+	name = "Bank Wealth Dashboard",
 	description = "Snapshots bank/inventory/equipment/GE/seed vault to disk for RSVault.",
 	tags = {"bank", "inventory", "export", "rsvault", "snapshot"}
 )
@@ -98,6 +99,7 @@ public class PersistentBankPlugin extends Plugin
 	@Inject private ScheduledExecutorService executor;
 	@Inject private ItemManager itemManager;
 	@Inject private ClientToolbar clientToolbar;
+	@Inject private ClientThread clientThread;
 
 	private SnapshotWriter writer;
 	private SnapshotReader reader;
@@ -139,7 +141,7 @@ public class PersistentBankPlugin extends Plugin
 		// Wealth panel. The panel itself is UI-only; the plugin owns the
 		// disk-scan and open-folder callbacks because they want access to
 		// snapshotDir / the executor thread.
-		panel = new WealthPanel(this::refreshPanel, this::openSnapshotFolder);
+		panel = new WealthPanel(this::refreshFromClient, this::openSnapshotFolder, snapshotDir);
 
 		BufferedImage icon = ImageUtil.loadImageResource(getClass(), "panel_icon.png");
 		NavigationButton.NavigationButtonBuilder b = NavigationButton.builder()
@@ -300,6 +302,19 @@ public class PersistentBankPlugin extends Plugin
 				}
 			}
 		}
+		if (config.snapshotGrandExchange() && s.grandExchange == null)
+		{
+			// The GE offer array is available the moment we're logged in, even
+			// when every slot is empty — capture it up front so a write can't
+			// record a total missing GE-held wealth (can be a big slice).
+			if (client.getGrandExchangeOffers() != null)
+			{
+				s.grandExchange = readAllGeSlots();
+				s.geUpdatedAt = System.currentTimeMillis();
+				changed = true;
+			}
+		}
+
 		// Bank and seed vault only populate when the player actually opens
 		// them, so we intentionally don't poll for those here — there's
 		// nothing to read yet.
@@ -313,7 +328,8 @@ public class PersistentBankPlugin extends Plugin
 		// Early-stop: once both sections are populated there's nothing
 		// more for onGameTick to do, so kill the retry window.
 		if ((!config.snapshotInventory() || s.inventory != null)
-			&& (!config.snapshotEquipment() || s.equipment != null))
+			&& (!config.snapshotEquipment() || s.equipment != null)
+			&& (!config.snapshotGrandExchange() || s.grandExchange != null))
 		{
 			initialSyncTicksRemaining = 0;
 		}
@@ -409,7 +425,15 @@ public class PersistentBankPlugin extends Plugin
 		AccountState s;
 		synchronized (accounts)
 		{
-			s = accounts.computeIfAbsent(hash, AccountState::new);
+			s = accounts.computeIfAbsent(hash, h ->
+			{
+				AccountState ns = new AccountState(h);
+				// Seed last-known bank / seed-vault / GE from disk so a flush
+				// fired before the player re-opens those interfaces this session
+				// can't overwrite the saved snapshot with empty sections.
+				reader.hydrate(snapshotDir, ns);
+				return ns;
+			});
 		}
 		// Refresh display name every time — it's cheap and cheap to keep
 		// current across name changes.
@@ -624,6 +648,21 @@ public class PersistentBankPlugin extends Plugin
 			recomputeValues(s);
 
 			writer.write(snapshotDir, s, now);
+			// Append a wealth-history point (throttled to coalesce the login burst).
+			// Only log a chart point once we have a complete picture: a positive
+			// total plus the always-live sections (inventory, equipment) actually
+			// captured, so a write fired in the first moments of login can't record
+			// a partial number. (The snapshot file itself still writes regardless.)
+			boolean haveLive = (!config.snapshotInventory() || s.inventory != null)
+				&& (!config.snapshotEquipment() || s.equipment != null)
+				&& (!config.snapshotBank() || s.bank != null)
+				&& (!config.snapshotGrandExchange() || s.grandExchange != null);
+			if (s.totalValueGp > 0L && haveLive
+				&& (now - s.lastHistoryMs >= 60_000L || s.lastHistoryMs == 0L))
+			{
+				WealthHistory.append(snapshotDir, s.accountHash, now, s.totalValueGp);
+				s.lastHistoryMs = now;
+			}
 			s.lastWriteMs = now;
 			s.dirty = false;
 			s.hasWrittenOnce = true;
@@ -656,15 +695,53 @@ public class PersistentBankPlugin extends Plugin
 	 * just contributes zero to the total, which is the right behaviour for
 	 * items that aren't tradeable or aren't in the price cache yet.
 	 */
+	private long geValue(List<AccountState.GeSlot> slots)
+	{
+		if (slots == null || slots.isEmpty()) return 0L;
+		long total = 0L;
+		for (AccountState.GeSlot g : slots)
+		{
+			if (g == null || g.state == null) continue;
+			String st = g.state;
+			int itemId   = g.itemId    == null ? 0 : g.itemId;
+			int totalQty = g.qtySought == null ? 0 : g.qtySought;
+			int traded   = g.qtyTraded == null ? 0 : g.qtyTraded;
+			int pricePer = g.pricePer  == null ? 0 : g.pricePer;
+			int spent    = g.spent     == null ? 0 : g.spent;
+			long unit = itemId > 0 ? priceFor(itemId) : 0L;
+
+			boolean buy  = st.equals("BUYING")  || st.equals("BOUGHT") || st.equals("CANCELLED_BUY");
+			boolean sell = st.equals("SELLING") || st.equals("SOLD")   || st.equals("CANCELLED_SELL");
+
+			if (buy)
+			{
+				// Coins still committed to the offer (refunded on completion/cancel)
+				// plus items already bought sitting in the collection box.
+				long committed = (long) pricePer * totalQty - spent;
+				if (committed < 0) committed = 0;
+				total += committed + unit * (long) traded;
+			}
+			else if (sell)
+			{
+				// Items still up for sale plus coins already received, both of
+				// which sit on the GE until the player collects.
+				total += unit * (long) Math.max(0, totalQty - traded) + spent;
+			}
+			// EMPTY / UNKNOWN contribute nothing.
+		}
+		return total;
+	}
 	private void recomputeValues(AccountState s)
 	{
 		s.bankValueGp      = containerValue(s.bank);
 		s.inventoryValueGp = containerValue(s.inventory);
 		s.equipmentValueGp = equipmentValue(s.equipment);
 		s.seedVaultValueGp = containerValue(s.seedVault);
+		s.geValueGp        = geValue(s.grandExchange);
 		s.totalValueGp =
 			s.bankValueGp + s.inventoryValueGp
-			+ s.equipmentValueGp + s.seedVaultValueGp;
+			+ s.equipmentValueGp + s.seedVaultValueGp
+			+ s.geValueGp;
 	}
 
 	private long containerValue(List<AccountState.ContainerItem> items)
@@ -736,6 +813,83 @@ public class PersistentBankPlugin extends Plugin
 
 	/** Open the snapshot folder in the OS file browser. Delegated from the
 	 *  Folder button in the wealth panel. */
+	/** Force-capture the live account and write it immediately, bypassing the
+	 *  rate-limit cooldown. Wired to the panel's Refresh button: re-reads every
+	 *  container the client currently holds, re-prices, and flushes now instead
+	 *  of waiting for the next scheduled write. */
+	private void refreshFromClient()
+	{
+		clientThread.invokeLater(() ->
+		{
+			if (!captureLiveAccount())
+			{
+				// Not logged in / nothing to capture — still re-read disk.
+				executor.submit(this::refreshPanel);
+			}
+			// On a successful capture, flush() already triggers refreshPanel.
+		});
+	}
+
+	/** Re-read every container the client currently holds for the logged-in
+	 *  account, then flush. Bank / seed vault are only available if the player
+	 *  has opened them this session; a missing section keeps its last-known
+	 *  (hydrated) value rather than being cleared. Must run on the client
+	 *  thread. Returns false when no account is logged in. */
+	private boolean captureLiveAccount()
+	{
+		AccountState s = stateForCurrentAccount();
+		if (s == null)
+		{
+			return false;
+		}
+		long now = System.currentTimeMillis();
+		if (config.snapshotInventory())
+		{
+			ItemContainer c = client.getItemContainer(InventoryID.INVENTORY);
+			if (c != null)
+			{
+				s.inventory = toContainerItems(c);
+				s.inventoryUpdatedAt = now;
+			}
+		}
+		if (config.snapshotEquipment())
+		{
+			ItemContainer c = client.getItemContainer(InventoryID.EQUIPMENT);
+			if (c != null)
+			{
+				s.equipment = toEquipmentItems(c);
+				s.equipmentUpdatedAt = now;
+			}
+		}
+		if (config.snapshotBank())
+		{
+			ItemContainer c = client.getItemContainer(InventoryID.BANK);
+			if (c != null)
+			{
+				s.bank = toContainerItems(c);
+				s.bankUpdatedAt = now;
+			}
+		}
+		if (config.snapshotSeedVault())
+		{
+			ItemContainer c = client.getItemContainer(InventoryID.SEED_VAULT);
+			if (c != null)
+			{
+				s.seedVault = toContainerItems(c);
+				s.seedVaultUpdatedAt = now;
+			}
+		}
+		if (config.snapshotGrandExchange() && client.getGrandExchangeOffers() != null)
+		{
+			s.grandExchange = readAllGeSlots();
+			s.geUpdatedAt = now;
+		}
+		s.touch();
+		cancelPending(s);
+		flush(s, "manual-refresh");
+		return true;
+	}
+
 	private void openSnapshotFolder()
 	{
 		try
