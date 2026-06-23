@@ -351,7 +351,16 @@ public class PersistentBankPlugin extends Plugin
 			if (!config.snapshotBank()) return;
 			AccountState s = stateForCurrentAccount();
 			if (s == null) return;
-			s.bank = toContainerItems(c);
+			List<AccountState.ContainerItem> incoming = toContainerItems(c);
+			if (isSpuriousEmpty(s.bank, incoming))
+			{
+				if (config.verboseLogging())
+				{
+					log.info("Persistent Bank: ignoring empty BANK event (keeping {} held items)", s.bank.size());
+				}
+				return;
+			}
+			s.bank = incoming;
 			s.bankUpdatedAt = System.currentTimeMillis();
 			s.touch();
 			maybeFlush(s);
@@ -381,7 +390,12 @@ public class PersistentBankPlugin extends Plugin
 			if (!config.snapshotSeedVault()) return;
 			AccountState s = stateForCurrentAccount();
 			if (s == null) return;
-			s.seedVault = toContainerItems(c);
+			List<AccountState.ContainerItem> incoming = toContainerItems(c);
+			if (isSpuriousEmpty(s.seedVault, incoming))
+			{
+				return;
+			}
+			s.seedVault = incoming;
 			s.seedVaultUpdatedAt = System.currentTimeMillis();
 			s.touch();
 			maybeFlush(s);
@@ -660,8 +674,25 @@ public class PersistentBankPlugin extends Plugin
 			if (s.totalValueGp > 0L && haveLive
 				&& (now - s.lastHistoryMs >= 60_000L || s.lastHistoryMs == 0L))
 			{
-				WealthHistory.append(snapshotDir, s.accountHash, now, s.totalValueGp);
-				s.lastHistoryMs = now;
+				long v = s.totalValueGp;
+				boolean collapse = s.lastHistoryValue > 0L && v * 2L < s.lastHistoryValue;
+				boolean confirmsDrop = s.pendingLowValue > 0L
+					&& v >= s.pendingLowValue - s.pendingLowValue / 6L
+					&& v <= s.pendingLowValue + s.pendingLowValue / 6L;
+				if (collapse && !confirmsDrop)
+				{
+					// A >50% single-step drop is almost always a capture glitch (real player
+					// actions conserve wealth). Hold it until a second reading corroborates it,
+					// so one bad read cannot crater the chart; a genuine drop still records next.
+					s.pendingLowValue = v;
+				}
+				else
+				{
+					WealthHistory.append(snapshotDir, s.accountHash, now, v);
+					s.lastHistoryMs = now;
+					s.lastHistoryValue = v;
+					s.pendingLowValue = 0L;
+				}
 			}
 			s.lastWriteMs = now;
 			s.dirty = false;
@@ -731,12 +762,43 @@ public class PersistentBankPlugin extends Plugin
 		}
 		return total;
 	}
+	/**
+	 * True when a fresh read of an open-on-demand section (bank / seed vault) is
+	 * empty/null while we already hold a populated snapshot. An empty bank event is
+	 * almost always the interface closing or the container being momentarily reused,
+	 * not the player emptying their bank, so accepting it would zero out a huge slice
+	 * of wealth for that write. We keep the last-known contents instead.
+	 */
+	private static boolean isSpuriousEmpty(List<AccountState.ContainerItem> existing,
+		List<AccountState.ContainerItem> incoming)
+	{
+		boolean incomingEmpty = incoming == null || incoming.isEmpty();
+		boolean haveExisting = existing != null && !existing.isEmpty();
+		return incomingEmpty && haveExisting;
+	}
+	
+	/**
+	 * Value a populated open-on-demand section, but never report zero for a section
+	 * that still holds items: a non-empty list that prices to 0 means the GE price
+	 * cache was not warm yet (common during the login burst), so we keep the last
+	 * known-good value rather than let a cold read zero out a slice of wealth.
+	 */
+	private long sectionValueOrKeep(List<AccountState.ContainerItem> items, long previous)
+	{
+		long v = containerValue(items);
+		if (v == 0L && previous > 0L && items != null && !items.isEmpty())
+		{
+			return previous;
+		}
+		return v;
+	}
+	
 	private void recomputeValues(AccountState s)
 	{
-		s.bankValueGp      = containerValue(s.bank);
+		s.bankValueGp = sectionValueOrKeep(s.bank, s.bankValueGp);
 		s.inventoryValueGp = containerValue(s.inventory);
 		s.equipmentValueGp = equipmentValue(s.equipment);
-		s.seedVaultValueGp = containerValue(s.seedVault);
+		s.seedVaultValueGp = sectionValueOrKeep(s.seedVault, s.seedVaultValueGp);
 		s.geValueGp        = geValue(s.grandExchange);
 		s.totalValueGp =
 			s.bankValueGp + s.inventoryValueGp
@@ -866,8 +928,12 @@ public class PersistentBankPlugin extends Plugin
 			ItemContainer c = client.getItemContainer(InventoryID.BANK);
 			if (c != null)
 			{
-				s.bank = toContainerItems(c);
-				s.bankUpdatedAt = now;
+				List<AccountState.ContainerItem> incoming = toContainerItems(c);
+				if (!isSpuriousEmpty(s.bank, incoming))
+				{
+					s.bank = incoming;
+					s.bankUpdatedAt = now;
+				}
 			}
 		}
 		if (config.snapshotSeedVault())
@@ -875,8 +941,12 @@ public class PersistentBankPlugin extends Plugin
 			ItemContainer c = client.getItemContainer(InventoryID.SEED_VAULT);
 			if (c != null)
 			{
-				s.seedVault = toContainerItems(c);
-				s.seedVaultUpdatedAt = now;
+				List<AccountState.ContainerItem> incoming = toContainerItems(c);
+				if (!isSpuriousEmpty(s.seedVault, incoming))
+				{
+					s.seedVault = incoming;
+					s.seedVaultUpdatedAt = now;
+				}
 			}
 		}
 		if (config.snapshotGrandExchange() && client.getGrandExchangeOffers() != null)

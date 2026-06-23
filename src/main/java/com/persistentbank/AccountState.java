@@ -46,6 +46,12 @@ class AccountState
 	long lastWriteMs;
 	/** Epoch ms of the last appended wealth-history point (login-burst throttle). */
 	long lastHistoryMs;
+	/** Value (gp) of the last appended history point; used to detect a collapse. */
+	long lastHistoryValue;
+	/** A suspiciously-low total held back until a second reading corroborates it
+	 *  (0 = none pending). Stops a one-off bad capture entering history without
+	 *  freezing a genuine sustained drop. */
+	long pendingLowValue;
 	boolean dirty;
 
 	/** Reference to a pending deferred-flush so we can cancel/coalesce. */
