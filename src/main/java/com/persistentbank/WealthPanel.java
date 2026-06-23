@@ -241,14 +241,27 @@ class WealthPanel extends PluginPanel
 	private void doUpdate(List<SnapshotReader.AccountSummary> summaries)
 	{
 		long grandTotal = 0L;
+		int incomplete = 0;
 		liveTotals = new HashMap<>();
 		for (SnapshotReader.AccountSummary s : summaries)
 		{
-			grandTotal += s.totalValueGp;
-			liveTotals.put(s.accountHash, s.totalValueGp);
+			if (s.complete)
+			{
+				grandTotal += s.totalValueGp;
+				liveTotals.put(s.accountHash, s.totalValueGp);
+			}
+			else
+			{
+				incomplete++;
+			}
 		}
-		totalValueLabel.setText(formatGp(grandTotal));
-		totalCaptionLabel.setText(summaries.size() == 1 ? "1 account" : summaries.size() + " accounts");
+		totalValueLabel.setText(grandTotal > 0L || summaries.isEmpty() ? formatGp(grandTotal) : "—");
+		String caption = summaries.size() == 1 ? "1 account" : summaries.size() + " accounts";
+		if (incomplete > 0)
+		{
+			caption += " · " + incomplete + " need bank opened";
+		}
+		totalCaptionLabel.setText(caption);
 
 		// Drop selections for accounts that no longer exist.
 		selected.retainAll(historyCache.keySet());
@@ -267,7 +280,9 @@ class WealthPanel extends PluginPanel
 		}
 		else
 		{
-			summaries.sort(Comparator.<SnapshotReader.AccountSummary>comparingLong(s -> s.totalValueGp).reversed());
+			summaries.sort(Comparator
+				.comparing((SnapshotReader.AccountSummary s) -> !s.complete)
+				.thenComparing(Comparator.comparingLong((SnapshotReader.AccountSummary s) -> s.totalValueGp).reversed()));
 			for (SnapshotReader.AccountSummary s : summaries)
 			{
 				JPanel row = buildRow(s);
@@ -427,12 +442,12 @@ class WealthPanel extends PluginPanel
 		JLabel nameLabel = new JLabel(name);
 		nameLabel.setFont(FontManager.getRunescapeBoldFont());
 
-		JLabel valueLabel = new JLabel(formatGp(s.totalValueGp));
+		JLabel valueLabel = new JLabel(s.complete ? formatGp(s.totalValueGp) : "—");
 		valueLabel.setFont(FontManager.getRunescapeBoldFont());
-		valueLabel.setForeground(VALUE_COLOR);
+		valueLabel.setForeground(s.complete ? VALUE_COLOR : Color.GRAY);
 		valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
 
-		JLabel timeLabel = new JLabel(formatRelative(s.lastUpdated));
+		JLabel timeLabel = new JLabel(s.complete ? formatRelative(s.lastUpdated) : "Incomplete — open your bank in-game");
 		timeLabel.setFont(FontManager.getRunescapeSmallFont());
 		timeLabel.setForeground(Color.GRAY);
 

@@ -86,6 +86,10 @@ class AccountState
 	 *  grand-total row and for external readers that don't want to sum
 	 *  the sections themselves. */
 	long totalValueGp;
+	/** True when the last write saw every enabled wealth section (or hydrated it):
+	 *  a complete, trustworthy net worth. False = a section (usually the bank) has
+	 *  not been observed yet, so the total is partial and must not be shown as wealth. */
+	boolean complete;
 
 	AccountState(long accountHash)
 	{

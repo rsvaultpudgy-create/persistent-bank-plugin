@@ -45,6 +45,7 @@ class SnapshotWriter
 		// the collection box, which have already left the other containers, so
 		// it is added without double-counting.
 		root.addProperty("totalValueGp", state.totalValueGp);
+		root.addProperty("complete", state.complete);
 
 		if (state.bank != null)
 		{

@@ -661,16 +661,22 @@ public class PersistentBankPlugin extends Plugin
 			// serializer and doesn't pull an ItemManager dependency.
 			recomputeValues(s);
 
+			// A snapshot is complete only when every enabled wealth section has been observed
+			// (or hydrated). An incomplete snapshot (e.g. bank never opened this session) holds
+			// a partial total that must not be shown as net worth, so we flag it; the panel then
+			// excludes it from the headline and the chart.
+			boolean haveLive = (!config.snapshotInventory() || s.inventory != null)
+				&& (!config.snapshotEquipment() || s.equipment != null)
+				&& (!config.snapshotBank() || s.bank != null)
+				&& (!config.snapshotGrandExchange() || s.grandExchange != null);
+			s.complete = haveLive;
+			
 			writer.write(snapshotDir, s, now);
 			// Append a wealth-history point (throttled to coalesce the login burst).
 			// Only log a chart point once we have a complete picture: a positive
 			// total plus the always-live sections (inventory, equipment) actually
 			// captured, so a write fired in the first moments of login can't record
 			// a partial number. (The snapshot file itself still writes regardless.)
-			boolean haveLive = (!config.snapshotInventory() || s.inventory != null)
-				&& (!config.snapshotEquipment() || s.equipment != null)
-				&& (!config.snapshotBank() || s.bank != null)
-				&& (!config.snapshotGrandExchange() || s.grandExchange != null);
 			if (s.totalValueGp > 0L && haveLive
 				&& (now - s.lastHistoryMs >= 60_000L || s.lastHistoryMs == 0L))
 			{

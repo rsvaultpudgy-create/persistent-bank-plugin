@@ -36,6 +36,7 @@ class SnapshotReader
 		long equipmentValueGp;
 		long seedVaultValueGp;
 		long geValueGp;
+		boolean complete;
 	}
 
 	/** Scan {@code snapshotDir} for *.json files and parse each into an
@@ -100,6 +101,7 @@ class SnapshotReader
 		s.equipmentValueGp = sectionValue(root, "equipment");
 		s.seedVaultValueGp = sectionValue(root, "seedVault");
 		s.geValueGp = sectionValue(root, "grandExchange");
+		s.complete = !root.has("complete") || asBool(root, "complete");
 
 		// Fallback: older snapshots pre-dating the wealth-panel work don't
 		// have a top-level totalValueGp. Derive from sections so those
@@ -150,6 +152,22 @@ class SnapshotReader
 		}
 	}
 
+	private static boolean asBool(JsonObject o, String key)
+	{
+		if (o == null || !o.has(key))
+		{
+			return true;
+		}
+		try
+		{
+			return o.get(key).getAsBoolean();
+		}
+		catch (Exception e)
+		{
+			return true;
+		}
+	}
+	
 	private static String asString(JsonObject o, String key, String fallback)
 	{
 		if (o == null || !o.has(key))
@@ -206,7 +224,7 @@ class SnapshotReader
 			if (bank != null)
 			{
 				List<AccountState.ContainerItem> items = parseContainerItems(bank);
-				if (items != null)
+				if (items != null && !items.isEmpty())
 				{
 					s.bank = items;
 					s.bankUpdatedAt = asLong(bank, "updatedAt");
@@ -218,7 +236,7 @@ class SnapshotReader
 			if (sv != null)
 			{
 				List<AccountState.ContainerItem> items = parseContainerItems(sv);
-				if (items != null)
+				if (items != null && !items.isEmpty())
 				{
 					s.seedVault = items;
 					s.seedVaultUpdatedAt = asLong(sv, "updatedAt");
