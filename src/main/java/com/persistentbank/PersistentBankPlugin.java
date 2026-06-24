@@ -352,7 +352,7 @@ public class PersistentBankPlugin extends Plugin
 			AccountState s = stateForCurrentAccount();
 			if (s == null) return;
 			List<AccountState.ContainerItem> incoming = toContainerItems(c);
-			if (isSpuriousEmpty(s.bank, incoming))
+			if (isEmptyRead(incoming))
 			{
 				if (config.verboseLogging())
 				{
@@ -391,7 +391,7 @@ public class PersistentBankPlugin extends Plugin
 			AccountState s = stateForCurrentAccount();
 			if (s == null) return;
 			List<AccountState.ContainerItem> incoming = toContainerItems(c);
-			if (isSpuriousEmpty(s.seedVault, incoming))
+			if (isEmptyRead(incoming))
 			{
 				return;
 			}
@@ -649,6 +649,14 @@ public class PersistentBankPlugin extends Plugin
 
 	private void flush(AccountState s, String reason)
 	{
+		if (!client.isClientThread())
+		{
+			// ItemManager price/composition lookups only return correct values on the client
+			// thread; off-thread (deferred / shutdown flushes) every price comes back 0, which
+			// zeroes out the whole snapshot. Run the valuation + write on the client thread.
+			clientThread.invokeLater(() -> flush(s, reason));
+			return;
+		}
 		try
 		{
 			long now = System.currentTimeMillis();
@@ -667,7 +675,7 @@ public class PersistentBankPlugin extends Plugin
 			// excludes it from the headline and the chart.
 			boolean haveLive = (!config.snapshotInventory() || s.inventory != null)
 				&& (!config.snapshotEquipment() || s.equipment != null)
-				&& (!config.snapshotBank() || s.bank != null)
+				&& (!config.snapshotBank() || (s.bank != null && !s.bank.isEmpty()))
 				&& (!config.snapshotGrandExchange() || s.grandExchange != null);
 			s.complete = haveLive;
 			
@@ -775,12 +783,14 @@ public class PersistentBankPlugin extends Plugin
 	 * not the player emptying their bank, so accepting it would zero out a huge slice
 	 * of wealth for that write. We keep the last-known contents instead.
 	 */
-	private static boolean isSpuriousEmpty(List<AccountState.ContainerItem> existing,
-		List<AccountState.ContainerItem> incoming)
+	private static boolean isEmptyRead(List<AccountState.ContainerItem> incoming)
 	{
-		boolean incomingEmpty = incoming == null || incoming.isEmpty();
-		boolean haveExisting = existing != null && !existing.isEmpty();
-		return incomingEmpty && haveExisting;
+		// An empty read of an open-on-demand section (bank / seed vault) is never trusted:
+		// the bank reports empty when its interface closes, is reused, or has not finished
+		// loading, and a genuinely empty bank holds no wealth anyway. Only a non-empty
+		// observation may set or replace the section, so a stray empty event can neither
+		// zero out a known bank nor fabricate a 'complete' account still missing its bank.
+		return incoming == null || incoming.isEmpty();
 	}
 	
 	/**
@@ -935,7 +945,7 @@ public class PersistentBankPlugin extends Plugin
 			if (c != null)
 			{
 				List<AccountState.ContainerItem> incoming = toContainerItems(c);
-				if (!isSpuriousEmpty(s.bank, incoming))
+				if (!isEmptyRead(incoming))
 				{
 					s.bank = incoming;
 					s.bankUpdatedAt = now;
@@ -948,7 +958,7 @@ public class PersistentBankPlugin extends Plugin
 			if (c != null)
 			{
 				List<AccountState.ContainerItem> incoming = toContainerItems(c);
-				if (!isSpuriousEmpty(s.seedVault, incoming))
+				if (!isEmptyRead(incoming))
 				{
 					s.seedVault = incoming;
 					s.seedVaultUpdatedAt = now;
