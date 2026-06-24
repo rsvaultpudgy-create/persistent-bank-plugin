@@ -67,6 +67,11 @@ import net.runelite.client.util.SwingUtil;
 class WealthPanel extends PluginPanel
 {
 	private static final Color VALUE_COLOR = ColorScheme.BRAND_ORANGE;
+	// Wealth-tier text colours: <10m white, 10m-999.99m green, 1b-9.99b blue, 10b+ purple.
+	private static final Color TIER_WHITE  = new Color(235, 235, 235);
+	private static final Color TIER_GREEN  = new Color(80, 215, 95);
+	private static final Color TIER_BLUE   = new Color(90, 165, 255);
+	private static final Color TIER_PURPLE = new Color(185, 120, 255);
 	private static final long DAY = 86_400_000L;
 	private static final String[] PERIOD_LABELS = {"1D", "1W", "1M", "6M", "1Y", "All"};
 	private static final long[] PERIOD_MS = {DAY, 7 * DAY, 30 * DAY, 182 * DAY, 365 * DAY, 0L};
@@ -256,6 +261,7 @@ class WealthPanel extends PluginPanel
 			}
 		}
 		totalValueLabel.setText(grandTotal > 0L || summaries.isEmpty() ? formatGp(grandTotal) : "—");
+		totalValueLabel.setForeground(colorForValue(grandTotal));
 		String caption = summaries.size() == 1 ? "1 account" : summaries.size() + " accounts";
 		if (incomplete > 0)
 		{
@@ -441,10 +447,11 @@ class WealthPanel extends PluginPanel
 		String name = s.displayName == null || s.displayName.isEmpty() ? "(unnamed)" : s.displayName;
 		JLabel nameLabel = new JLabel(name);
 		nameLabel.setFont(FontManager.getRunescapeBoldFont());
+		nameLabel.setForeground(s.complete ? colorForValue(s.totalValueGp) : Color.WHITE);
 
 		JLabel valueLabel = new JLabel(s.complete ? formatGp(s.totalValueGp) : "—");
 		valueLabel.setFont(FontManager.getRunescapeBoldFont());
-		valueLabel.setForeground(s.complete ? VALUE_COLOR : Color.GRAY);
+		valueLabel.setForeground(s.complete ? colorForValue(s.totalValueGp) : Color.GRAY);
 		valueLabel.setHorizontalAlignment(SwingConstants.RIGHT);
 
 		JLabel timeLabel = new JLabel(s.complete ? formatRelative(s.lastUpdated) : "Incomplete — open your bank in-game");
@@ -558,6 +565,15 @@ class WealthPanel extends PluginPanel
 
 	// ---- formatting helpers -------------------------------------------------
 
+	/** Text colour for a wealth figure by magnitude tier. */
+	static Color colorForValue(long gp)
+	{
+		if (gp >= 10_000_000_000L) return TIER_PURPLE; // 10b+
+		if (gp >= 1_000_000_000L) return TIER_BLUE;    // 1b - 9.99b
+		if (gp >= 10_000_000L) return TIER_GREEN;      // 10m - 999.99m
+		return TIER_WHITE;                             // up to 9,999,999
+	}
+	
 	static String formatGp(long gp)
 	{
 		if (gp <= 0) return "0 gp";
